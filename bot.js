@@ -1279,4 +1279,4 @@ console.log(
 
 console.log(
   "✅ Bot is running."
-)
+);

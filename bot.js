@@ -2,20 +2,26 @@ import TelegramBot from "node-telegram-bot-api";
 import { createClient } from "@supabase/supabase-js";
 
 /*
-========================================================
-TELEGRAM SHOP BOT
-Node.js + Telegram + Supabase
-========================================================
+====================================================
+        TRUSTED SELLER TELEGRAM SHOP BOT
+====================================================
 
-REQUIRED ENV VARIABLES:
+ENV VARIABLES REQUIRED:
 
 BOT_TOKEN
 SUPABASE_URL
 SUPABASE_SECRET_KEY
 ADMIN_EMAIL
 
-========================================================
+OPTIONAL:
+
+SUPPORT_USERNAME
+BOT_NAME
 */
+
+/* ==================================================
+   ENV
+================================================== */
 
 const BOT_TOKEN = String(process.env.BOT_TOKEN || "").trim();
 
@@ -33,12 +39,17 @@ const ADMIN_EMAIL = String(
   process.env.ADMIN_EMAIL || ""
 ).trim().toLowerCase();
 
+const SUPPORT_USERNAME = String(
+  process.env.SUPPORT_USERNAME || ""
+).trim();
 
-/*
-========================================================
-ENV CHECK
-========================================================
-*/
+const BOT_NAME = String(
+  process.env.BOT_NAME || "Trusted Seller Shop"
+).trim();
+
+/* ==================================================
+   ENV CHECK
+================================================== */
 
 if (!BOT_TOKEN) {
   throw new Error("BOT_TOKEN is missing");
@@ -56,12 +67,9 @@ if (!ADMIN_EMAIL) {
   throw new Error("ADMIN_EMAIL is missing");
 }
 
-
-/*
-========================================================
-CLIENTS
-========================================================
-*/
+/* ==================================================
+   CLIENTS
+================================================== */
 
 const bot = new TelegramBot(BOT_TOKEN, {
   polling: true
@@ -72,12 +80,9 @@ const supabase = createClient(
   SUPABASE_KEY
 );
 
-
-/*
-========================================================
-SESSIONS
-========================================================
-*/
+/* ==================================================
+   SESSIONS
+================================================== */
 
 const sessions = new Map();
 
@@ -85,8 +90,7 @@ function getSession(userId) {
   if (!sessions.has(userId)) {
     sessions.set(userId, {
       mode: null,
-      product: {},
-      adminVerified: false
+      data: {}
     });
   }
 
@@ -97,49 +101,96 @@ function clearSession(userId) {
   sessions.delete(userId);
 }
 
-
-/*
-========================================================
-HELPERS
-========================================================
-*/
+/* ==================================================
+   HELPERS
+================================================== */
 
 function money(value) {
-  const number = Number(value || 0);
-
-  return `₹${number.toFixed(2)}`;
+  return `₹${Number(value || 0).toFixed(2)}`;
 }
 
-function safeText(value) {
+function escapeHtml(value) {
   return String(value ?? "")
-    .replace(/[<>]/g, "");
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
+
+function shortText(text, length = 80) {
+  const value = String(text || "");
+
+  if (value.length <= length) {
+    return value;
+  }
+
+  return value.substring(0, length - 3) + "...";
+}
+
+function usernameOf(user) {
+  if (user?.username) {
+    return `@${user.username}`;
+  }
+
+  return user?.first_name || "User";
+}
+
+function referralCode(userId) {
+  return `TS${String(userId).slice(-6)}`;
+}
+
+/* ==================================================
+   MAIN MENU
+================================================== */
 
 function mainMenu(isAdmin = false) {
-
   const keyboard = [
     [
       {
-        text: "🛍 Products",
-        callback_data: "products"
+        text: "🛒 Shop Now",
+        callback_data: "shop"
       }
     ],
-    [
-      {
-        text: "👤 My Account",
-        callback_data: "account"
-      }
-    ],
+
     [
       {
         text: "📦 My Orders",
         callback_data: "orders"
+      },
+      {
+        text: "👤 Profile",
+        callback_data: "profile"
       }
     ],
+
     [
       {
-        text: "ℹ️ Help",
-        callback_data: "help"
+        text: "💎 Upgrade to Reseller",
+        callback_data: "upgrade"
+      }
+    ],
+
+    [
+      {
+        text: "📢 How to Use",
+        callback_data: "tutorial"
+      },
+      {
+        text: "🚨 Support",
+        callback_data: "support"
+      }
+    ],
+
+    [
+      {
+        text: "🆔 ID / LVL ID",
+        callback_data: "level"
+      }
+    ],
+
+    [
+      {
+        text: "🎁 Refer & Earn",
+        callback_data: "refer"
       }
     ]
   ];
@@ -160,45 +211,17 @@ function mainMenu(isAdmin = false) {
   };
 }
 
+/* ==================================================
+   BACK BUTTON
+================================================== */
 
-function adminMenu() {
-
+function backButton() {
   return {
     reply_markup: {
       inline_keyboard: [
         [
           {
-            text: "➕ Add Product",
-            callback_data: "admin_add_product"
-          }
-        ],
-        [
-          {
-            text: "📦 Products",
-            callback_data: "admin_products"
-          }
-        ],
-        [
-          {
-            text: "👥 Customers",
-            callback_data: "admin_customers"
-          }
-        ],
-        [
-          {
-            text: "🧾 Orders",
-            callback_data: "admin_orders"
-          }
-        ],
-        [
-          {
-            text: "📊 Dashboard",
-            callback_data: "admin_dashboard"
-          }
-        ],
-        [
-          {
-            text: "🏠 Main Menu",
+            text: "↩️ Back to Menu",
             callback_data: "home"
           }
         ]
@@ -207,952 +230,794 @@ function adminMenu() {
   };
 }
 
+/* ==================================================
+   ADMIN CHECK
+================================================== */
 
-/*
-========================================================
-DATABASE HELPERS
-========================================================
-*/
-
-async function getUser(telegramId) {
-
-  const { data, error } = await supabase
-    .from("users")
-    .select("*")
-    .eq("telegram_id", String(telegramId))
-    .maybeSingle();
-
-  if (error) {
-    console.error("getUser:", error.message);
-    return null;
-  }
-
-  return data;
-}
-
-
-async function ensureUser(msg) {
-
-  const telegramId = String(msg.from.id);
-
-  const existing = await getUser(telegramId);
-
-  if (existing) {
-    return existing;
-  }
-
-  const username =
-    msg.from.username ||
-    msg.from.first_name ||
-    "User";
-
-  const { data, error } = await supabase
-    .from("users")
-    .insert({
-      telegram_id: telegramId,
-      username: username,
-      role: "customer"
-    })
-    .select("*")
-    .single();
-
-  if (error) {
-    console.error("ensureUser:", error.message);
-    return null;
-  }
-
-  return data;
-}
-
-
-async function getProducts() {
-
-  const { data, error } = await supabase
-    .from("products")
-    .select("*")
-    .order("id", {
-      ascending: false
-    });
-
-  if (error) {
-    console.error("getProducts:", error.message);
-    return [];
-  }
-
-  return data || [];
-}
-
-
-async function getProduct(id) {
-
-  const { data, error } = await supabase
-    .from("products")
-    .select("*")
-    .eq("id", id)
-    .maybeSingle();
-
-  if (error) {
-    console.error("getProduct:", error.message);
-    return null;
-  }
-
-  return data;
-}
-
-
-/*
-========================================================
-ADMIN CHECK
-========================================================
-*/
-
-async function isAdmin(msg) {
-
-  const user = await getUser(msg.from.id);
-
-  if (user && user.role === "admin") {
-    return true;
-  }
-
-  return false;
-}
-
-
-/*
-========================================================
-START COMMAND
-========================================================
-*/
-
-bot.onText(/^\/start$/, async (msg) => {
-
+async function isAdmin(userId) {
   try {
-
-    const user = await ensureUser(msg);
-
-    const admin = await isAdmin(msg);
-
-    const name =
-      msg.from.first_name ||
-      msg.from.username ||
-      "User";
-
-    await bot.sendMessage(
-      msg.chat.id,
-
-      `👋 Welcome ${safeText(name)}!
-
-🛍 *Trusted Seller Shop*
-
-Choose an option below:`,
-
-      {
-        parse_mode: "Markdown",
-        ...mainMenu(admin)
-      }
-    );
-
-  } catch (error) {
-
-    console.error("/start error:", error);
-
-    await bot.sendMessage(
-      msg.chat.id,
-      "❌ Something went wrong. Please try again."
-    );
-  }
-});
-
-
-/*
-========================================================
-ADMIN LOGIN BY EMAIL
-========================================================
-
-Use:
-
-/admin your@email.com
-
-========================================================
-*/
-
-bot.onText(/^\/admin(?:\s+(.+))?$/i, async (msg, match) => {
-
-  const chatId = msg.chat.id;
-  const userId = msg.from.id;
-
-  try {
-
-    const suppliedEmail =
-      String(match?.[1] || "")
-        .trim()
-        .toLowerCase();
-
-    if (!suppliedEmail) {
-
-      await bot.sendMessage(
-        chatId,
-        "🔐 Admin login\n\nUse:\n/admin your-email@example.com"
-      );
-
-      return;
-    }
-
-    if (suppliedEmail !== ADMIN_EMAIL) {
-
-      await bot.sendMessage(
-        chatId,
-        "❌ This email is not authorized."
-      );
-
-      return;
-    }
-
-    const user = await getUser(userId);
-
-    if (!user) {
-
-      await bot.sendMessage(
-        chatId,
-        "❌ Your Telegram account is not registered yet.\n\nSend /start first."
-      );
-
-      return;
-    }
-
-    const { error } = await supabase
-      .from("users")
-      .update({
-        role: "admin",
-        email: suppliedEmail
-      })
-      .eq("telegram_id", String(userId));
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("email")
+      .eq("telegram_id", String(userId))
+      .maybeSingle();
 
     if (error) {
+      console.error("Admin check error:", error.message);
+      return false;
+    }
 
-      console.error("Admin update:", error.message);
+    if (!data?.email) {
+      return false;
+    }
+
+    return String(data.email)
+      .trim()
+      .toLowerCase() === ADMIN_EMAIL;
+  } catch (error) {
+    console.error("Admin check exception:", error);
+    return false;
+  }
+}
+
+/* ==================================================
+   PROFILE
+================================================== */
+
+async function ensureProfile(user) {
+  const telegramId = String(user.id);
+
+  try {
+    const { data: existing, error: findError } = await supabase
+      .from("profiles")
+      .select("*")
+      .eq("telegram_id", telegramId)
+      .maybeSingle();
+
+    if (findError) {
+      throw findError;
+    }
+
+    if (existing) {
+      return existing;
+    }
+
+    const newProfile = {
+      telegram_id: telegramId,
+      username: user.username || null,
+      first_name: user.first_name || null,
+      email: null,
+      balance: 0,
+      level: 1,
+      referral_code: referralCode(user.id),
+      referred_by: null
+    };
+
+    const { data, error } = await supabase
+      .from("profiles")
+      .insert(newProfile)
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Profile create error:", error.message);
+      return newProfile;
+    }
+
+    return data;
+  } catch (error) {
+    console.error("ensureProfile error:", error);
+    return {
+      telegram_id: telegramId,
+      username: user.username || null,
+      first_name: user.first_name || null,
+      balance: 0,
+      level: 1,
+      referral_code: referralCode(user.id)
+    };
+  }
+}
+
+/* ==================================================
+   HOME
+================================================== */
+
+async function sendHome(chatId, user) {
+  const admin = await isAdmin(user.id);
+
+  const text =
+`🛍 <b>${escapeHtml(BOT_NAME)}</b>
+
+Welcome <b>${escapeHtml(
+    user.first_name || "User"
+  )}</b> 👋
+
+🛒 <b>Shop Now</b> — Browse products and purchase instantly
+
+📦 <b>My Orders</b> — Check your purchase history
+
+👤 <b>Profile</b> — Check account information
+
+💎 <b>Upgrade to Reseller</b> — Unlock reseller benefits
+
+📢 <b>How to Use</b> — Learn how the bot works
+
+🚨 <b>Support</b> — Contact support
+
+🆔 <b>ID / LVL ID</b> — Check your account level
+
+🎁 <b>Refer & Earn</b> — Invite friends and earn rewards`;
+
+  await bot.sendMessage(chatId, text, {
+    parse_mode: "HTML",
+    ...mainMenu(admin)
+  });
+}
+
+/* ==================================================
+   SHOP
+================================================== */
+
+async function sendProducts(chatId) {
+  try {
+    const { data, error } = await supabase
+      .from("products")
+      .select("*")
+      .eq("active", true)
+      .order("created_at", {
+        ascending: false
+      });
+
+    if (error) {
+      console.error("Products error:", error.message);
 
       await bot.sendMessage(
         chatId,
-        "❌ Admin account update failed."
+        "❌ Products load नहीं हो सके।\n\nDatabase error:\n" +
+        error.message,
+        backButton()
       );
 
       return;
     }
 
-    const session = getSession(userId);
+    if (!data || data.length === 0) {
+      await bot.sendMessage(
+        chatId,
+        "🛒 <b>Shop Now</b>\n\nअभी कोई product available नहीं है.",
+        {
+          parse_mode: "HTML",
+          ...backButton()
+        }
+      );
 
-    session.adminVerified = true;
+      return;
+    }
+
+    const buttons = [];
+
+    for (const product of data) {
+      const stock = Number(product.stock || 0);
+
+      buttons.push([
+        {
+          text:
+            `${product.name} — ${money(product.price)} ${
+              stock > 0 ? `🟢 ${stock}` : "🔴 OUT"
+            }`,
+          callback_data: `product:${product.id}`
+        }
+      ]);
+    }
+
+    buttons.push([
+      {
+        text: "↩️ Back to Menu",
+        callback_data: "home"
+      }
+    ]);
 
     await bot.sendMessage(
       chatId,
-      "✅ Admin access enabled.",
-      adminMenu()
+      "🛒 <b>Shop Store Now</b>\n\nSelect a product below:",
+      {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: buttons
+        }
+      }
     );
-
   } catch (error) {
-
-    console.error("Admin login:", error);
-
-    await bot.sendMessage(
-      chatId,
-      "❌ Admin login failed."
-    );
-  }
-});
-
-
-/*
-========================================================
-PRODUCTS
-========================================================
-*/
-
-async function sendProducts(chatId) {
-
-  const products = await getProducts();
-
-  if (!products.length) {
+    console.error("sendProducts error:", error);
 
     await bot.sendMessage(
       chatId,
-      "📦 No products available right now.",
-      mainMenu()
+      "❌ Products खोलते समय error आया.",
+      backButton()
     );
-
-    return;
   }
+}
 
-  for (const product of products) {
+/* ==================================================
+   PRODUCT DETAILS
+================================================== */
+
+async function sendProduct(chatId, productId) {
+  try {
+    const { data: product, error } = await supabase
+      .from("products")
+      .select("*")
+      .eq("id", productId)
+      .maybeSingle();
+
+    if (error) {
+      throw error;
+    }
+
+    if (!product) {
+      await bot.sendMessage(
+        chatId,
+        "❌ Product नहीं मिला.",
+        backButton()
+      );
+
+      return;
+    }
 
     const stock = Number(product.stock || 0);
 
     let text =
-      `🛍 *${safeText(product.name)}*\n\n` +
-      `💰 Price: ${money(product.price)}\n` +
-      `📦 Stock: ${stock}\n`;
+`🛍 <b>${escapeHtml(product.name)}</b>
+
+💰 Price: <b>${money(product.price)}</b>
+📦 Stock: <b>${stock}</b>`;
 
     if (product.description) {
-      text +=
-        `\n📝 ${safeText(product.description)}\n`;
+      text += `\n\n📝 ${escapeHtml(product.description)}`;
     }
 
-    const keyboard = [];
+    if (stock <= 0) {
+      text += "\n\n🔴 <b>Out of Stock</b>";
 
-    if (stock > 0) {
-
-      keyboard.push([
-        {
-          text: "🛒 Buy",
-          callback_data: `buy_${product.id}`
+      await bot.sendMessage(chatId, text, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: "↩️ Back to Shop",
+                callback_data: "shop"
+              }
+            ]
+          ]
         }
-      ]);
+      });
 
-    } else {
+      return;
+    }
 
-      text += "\n❌ Out of stock";
+    await bot.sendMessage(chatId, text, {
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: "🛒 Buy Now",
+              callback_data: `buy:${product.id}`
+            }
+          ],
+          [
+            {
+              text: "↩️ Back to Shop",
+              callback_data: "shop"
+            }
+          ]
+        ]
+      }
+    });
+  } catch (error) {
+    console.error("sendProduct error:", error);
+
+    await bot.sendMessage(
+      chatId,
+      "❌ Product खोलते समय error आया.",
+      backButton()
+    );
+  }
+}
+
+/* ==================================================
+   BUY PRODUCT
+================================================== */
+
+async function buyProduct(chatId, user, productId) {
+  try {
+    const profile = await ensureProfile(user);
+
+    const { data: product, error: productError } = await supabase
+      .from("products")
+      .select("*")
+      .eq("id", productId)
+      .maybeSingle();
+
+    if (productError) {
+      throw productError;
+    }
+
+    if (!product) {
+      await bot.sendMessage(
+        chatId,
+        "❌ Product नहीं मिला."
+      );
+
+      return;
+    }
+
+    const price = Number(product.price || 0);
+    const stock = Number(product.stock || 0);
+    const balance = Number(profile.balance || 0);
+
+    if (stock <= 0) {
+      await bot.sendMessage(
+        chatId,
+        "❌ यह product अभी out of stock है."
+      );
+
+      return;
+    }
+
+    if (balance < price) {
+      await bot.sendMessage(
+        chatId,
+`❌ <b>Insufficient Balance</b>
+
+💰 Your Balance: ${money(balance)}
+🛍 Product Price: ${money(price)}
+
+पहले balance add करें.`,
+        {
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  text: "💰 Add Balance",
+                  callback_data: "balance"
+                }
+              ],
+              [
+                {
+                  text: "↩️ Back to Shop",
+                  callback_data: "shop"
+                }
+              ]
+            ]
+          }
+        }
+      );
+
+      return;
+    }
+
+    const newBalance = balance - price;
+
+    const { error: balanceError } = await supabase
+      .from("profiles")
+      .update({
+        balance: newBalance
+      })
+      .eq("telegram_id", String(user.id));
+
+    if (balanceError) {
+      throw balanceError;
+    }
+
+    const newStock = stock - 1;
+
+    const { error: stockError } = await supabase
+      .from("products")
+      .update({
+        stock: newStock
+      })
+      .eq("id", product.id);
+
+    if (stockError) {
+      await supabase
+        .from("profiles")
+        .update({
+          balance: balance
+        })
+        .eq("telegram_id", String(user.id));
+
+      throw stockError;
+    }
+
+    const { data: order, error: orderError } = await supabase
+      .from("orders")
+      .insert({
+        telegram_id: String(user.id),
+        product_id: product.id,
+        product_name: product.name,
+        price: price,
+        status: "completed"
+      })
+      .select()
+      .single();
+
+    if (orderError) {
+      await supabase
+        .from("profiles")
+        .update({
+          balance: balance
+        })
+        .eq("telegram_id", String(user.id));
+
+      await supabase
+        .from("products")
+        .update({
+          stock: stock
+        })
+        .eq("id", product.id);
+
+      throw orderError;
+    }
+
+    let deliveryText = "";
+
+    if (product.delivery) {
+      deliveryText =
+        `\n\n📦 <b>Delivery:</b>\n<code>${escapeHtml(
+          product.delivery
+        )}</code>`;
+    }
+
+    await bot.sendMessage(
+      chatId,
+`🎉 <b>Order Successful!</b>
+
+🧾 Order ID: <code>${escapeHtml(
+        order?.id || "N/A"
+      )}</code>
+
+🛍 Product: <b>${escapeHtml(
+        product.name
+      )}</b>
+
+💰 Paid: <b>${money(price)}</b>
+
+💳 Remaining Balance: <b>${money(
+        newBalance
+      )}</b>${deliveryText}`,
+      {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: "📦 My Orders",
+                callback_data: "orders"
+              }
+            ],
+            [
+              {
+                text: "🛒 Shop More",
+                callback_data: "shop"
+              }
+            ],
+            [
+              {
+                text: "🏠 Main Menu",
+                callback_data: "home"
+              }
+            ]
+          ]
+        }
+      }
+    );
+  } catch (error) {
+    console.error("buyProduct error:", error);
+
+    await bot.sendMessage(
+      chatId,
+      "❌ Order process नहीं हो सका.\n\n" +
+      escapeHtml(error.message || "Unknown error"),
+      {
+        parse_mode: "HTML",
+        ...backButton()
+      }
+    );
+  }
+}
+
+/* ==================================================
+   ORDERS
+================================================== */
+
+async function sendOrders(chatId, user) {
+  try {
+    const { data, error } = await supabase
+      .from("orders")
+      .select("*")
+      .eq("telegram_id", String(user.id))
+      .order("created_at", {
+        ascending: false
+      })
+      .limit(20);
+
+    if (error) {
+      throw error;
+    }
+
+    if (!data || data.length === 0) {
+      await bot.sendMessage(
+        chatId,
+        "📦 <b>My Orders</b>\n\nअभी कोई order नहीं है.",
+        {
+          parse_mode: "HTML",
+          ...backButton()
+        }
+      );
+
+      return;
+    }
+
+    let text = "📦 <b>My Orders</b>\n\n";
+
+    for (const order of data) {
+      text +=
+`🧾 <b>#${escapeHtml(
+        String(order.id).slice(-8)
+      )}</b>
+🛍 ${      text +=
+        `\n📦 <b>${escapeHtml(
+          String(
+            order.product_name ??
+            order.product ??
+            order.name ??
+            "Product"
+          )
+        )}</b>\n` +
+
+        `🆔 Order ID: <code>${escapeHtml(
+          String(order.id ?? "")
+        )}</code>\n` +
+
+        `💰 Amount: <b>${money(
+          order.amount ??
+          order.price ??
+          order.total ??
+          0
+        )}</b>\n` +
+
+        `📌 Status: <b>${escapeHtml(
+          String(order.status ?? "pending")
+        )}</b>\n` +
+
+        `📅 Date: ${escapeHtml(
+          order.created_at
+            ? new Date(order.created_at).toLocaleString("en-IN")
+            : "N/A"
+        )}\n` +
+
+        `━━━━━━━━━━━━━━━━━━\n`;
     }
 
     await bot.sendMessage(
       chatId,
       text,
       {
-        parse_mode: "Markdown",
-        reply_markup: {
-          inline_keyboard: keyboard
-        }
+        parse_mode: "HTML",
+        ...backButton()
+      }
+    );
+
+  } catch (error) {
+
+    console.error("sendOrders error:", error);
+
+    await bot.sendMessage(
+      chatId,
+      "❌ <b>Orders load नहीं हो सके।</b>\n\n" +
+      escapeHtml(error.message || "Unknown error"),
+      {
+        parse_mode: "HTML",
+        ...backButton()
       }
     );
   }
-
-  await bot.sendMessage(
-    chatId,
-    "🏠 Main Menu",
-    mainMenu()
-  );
 }
 
 
-/*
-========================================================
-ACCOUNT
-========================================================
-*/
-
-async function sendAccount(msg) {
-
-  const user = await getUser(msg.from.id);
-
-  if (!user) {
-
-    await bot.sendMessage(
-      msg.chat.id,
-      "❌ Account not found."
-    );
-
-    return;
-  }
-
-  const text =
-    `👤 *My Account*\n\n` +
-    `🆔 Telegram ID: ${safeText(user.telegram_id)}\n` +
-    `👤 Username: ${safeText(user.username || "-")}\n` +
-    `📧 Email: ${safeText(user.email || "-")}\n` +
-    `⭐ Role: ${safeText(user.role || "customer")}`;
-
-  await bot.sendMessage(
-    msg.chat.id,
-    text,
-    {
-      parse_mode: "Markdown",
-      ...mainMenu(user.role === "admin")
-    }
-  );
-}
-
-
-/*
-========================================================
-ORDERS
-========================================================
-*/
-
-async function sendOrders(msg) {
-
-  const telegramId = String(msg.from.id);
-
-  const { data, error } = await supabase
-    .from("orders")
-    .select("*")
-    .eq("telegram_id", telegramId)
-    .order("id", {
-      ascending: false
-    });
-
-  if (error) {
-
-    console.error("Orders:", error.message);
-
-    await bot.sendMessage(
-      msg.chat.id,
-      "❌ Orders could not be loaded."
-    );
-
-    return;
-  }
-
-  if (!data?.length) {
-
-    await bot.sendMessage(
-      msg.chat.id,
-      "🧾 You don't have any orders yet.",
-      mainMenu()
-    );
-
-    return;
-  }
-
-  let text = "🧾 *My Orders*\n\n";
-
-  for (const order of data.slice(0, 20)) {
-
-    text +=
-      `#${order.id} — ` +
-      `${safeText(order.status || "pending")}\n`;
-
-    if (order.amount !== undefined) {
-      text += `💰 ${money(order.amount)}\n`;
-    }
-
-    text += "\n";
-  }
-
-  await bot.sendMessage(
-    msg.chat.id,
-    text,
-    {
-      parse_mode: "Markdown",
-      ...mainMenu()
-    }
-  );
-}
-
-
-/*
-========================================================
-HELP
-========================================================
-*/
-
-async function sendHelp(chatId) {
-
-  await bot.sendMessage(
-    chatId,
-
-    `ℹ️ *Help*
-
-🛍 Products — View available products
-👤 My Account — View your account
-📦 My Orders — View your orders
-
-For support, contact the seller.`,
-
-    {
-      parse_mode: "Markdown",
-      ...mainMenu()
-    }
-  );
-}
-
-
-/*
-========================================================
-ADMIN DASHBOARD
-========================================================
-*/
-
-async function adminDashboard(chatId) {
-
-  const { count: productCount } =
-    await supabase
-      .from("products")
-      .select("*", {
-        count: "exact",
-        head: true
-      });
-
-  const { count: customerCount } =
-    await supabase
-      .from("users")
-      .select("*", {
-        count: "exact",
-        head: true
-      })
-      .eq("role", "customer");
-
-  const { count: orderCount } =
-    await supabase
-      .from("orders")
-      .select("*", {
-        count: "exact",
-        head: true
-      });
-
-  const { data: orders } =
-    await supabase
-      .from("orders")
-      .select("amount");
-
-  let totalSales = 0;
-
-  for (const order of orders || []) {
-    totalSales += Number(order.amount || 0);
-  }
-
-  await bot.sendMessage(
-    chatId,
-
-    `📊 *SALES DASHBOARD*
-
-🛍 Products:
-${productCount || 0}
-
-👥 Customers:
-${customerCount || 0}
-
-🧾 Orders:
-${orderCount || 0}
-
-💰 Total Sales:
-${money(totalSales)}`,
-
-    {
-      parse_mode: "Markdown",
-      ...adminMenu()
-    }
-  );
-}
-
-
-/*
-========================================================
-ADMIN PRODUCTS
-========================================================
-*/
-
-async function adminProducts(chatId) {
-
-  const products = await getProducts();
-
-  if (!products.length) {
-
-    await bot.sendMessage(
-      chatId,
-      "📦 No products found.",
-      adminMenu()
-    );
-
-    return;
-  }
-
-  let text = "📦 *PRODUCTS*\n\n";
-
-  for (const product of products) {
-
-    text +=
-      `🆔 ${product.id}\n` +
-      `📦 ${safeText(product.name)}\n` +
-      `💰 ${money(product.price)}\n` +
-      `📊 Stock: ${Number(product.stock || 0)}\n\n`;
-  }
-
-  await bot.sendMessage(
-    chatId,
-    text,
-    {
-      parse_mode: "Markdown",
-      ...adminMenu()
-    }
-  );
-}
-
-
-/*
-========================================================
-ADMIN CUSTOMERS
-========================================================
-*/
-
-async function adminCustomers(chatId) {
-
-  const { data, error } = await supabase
-    .from("users")
-    .select("*")
-    .eq("role", "customer")
-    .order("id", {
-      ascending: false
-    });
-
-  if (error) {
-
-    console.error("Customers:", error.message);
-
-    await bot.sendMessage(
-      chatId,
-      "❌ Customers could not be loaded.",
-      adminMenu()
-    );
-
-    return;
-  }
-
-  if (!data?.length) {
-
-    await bot.sendMessage(
-      chatId,
-      "👥 No customers found.",
-      adminMenu()
-    );
-
-    return;
-  }
-
-  let text = "👥 *CUSTOMERS*\n\n";
-
-  for (const user of data.slice(0, 50)) {
-
-    text +=
-      `🆔 ${safeText(user.telegram_id)}\n` +
-      `👤 ${safeText(user.username || "-")}\n` +
-      `📧 ${safeText(user.email || "-")}\n\n`;
-  }
-
-  await bot.sendMessage(
-    chatId,
-    text,
-    {
-      parse_mode: "Markdown",
-      ...adminMenu()
-    }
-  );
-}
-
-
-/*
-========================================================
-ADMIN ORDERS
-========================================================
-*/
-
-async function adminOrders(chatId) {
-
-  const { data, error } = await supabase
-    .from("orders")
-    .select("*")
-    .order("id", {
-      ascending: false
-    })
-    .limit(50);
-
-  if (error) {
-
-    console.error("Admin orders:", error.message);
-
-    await bot.sendMessage(
-      chatId,
-      "❌ Orders could not be loaded.",
-      adminMenu()
-    );
-
-    return;
-  }
-
-  if (!data?.length) {
-
-    await bot.sendMessage(
-      chatId,
-      "🧾 No orders found.",
-      adminMenu()
-    );
-
-    return;
-  }
-
-  let text = "🧾 *ALL ORDERS*\n\n";
-
-  for (const order of data) {
-
-    text +=
-      `🆔 Order #${order.id}\n` +
-      `👤 ${safeText(order.telegram_id || "-")}\n` +
-      `💰 ${money(order.amount || 0)}\n` +
-      `📌 ${safeText(order.status || "pending")}\n\n`;
-  }
-
-  await bot.sendMessage(
-    chatId,
-    text,
-    {
-      parse_mode: "Markdown",
-      ...adminMenu()
-    }
-  );
-}
-
-
-/*
-========================================================
-ADD PRODUCT - START
-========================================================
-*/
-
-async function startAddProduct(msg) {
-
-  const userId = msg.from.id;
-
-  const admin = await isAdmin(msg);
-
-  if (!admin) {
-
-    await bot.sendMessage(
-      msg.chat.id,
-      "❌ Admin access required."
-    );
-
-    return;
-  }
-
-  const session = getSession(userId);
-
-  session.mode = "add_product_name";
-  session.product = {};
-
-  await bot.sendMessage(
-    msg.chat.id,
-    "➕ *Add Product*\n\nSend product name:",
-    {
-      parse_mode: "Markdown"
-    }
-  );
-}
-
-
-/*
-========================================================
-SAVE PRODUCT
-========================================================
-*/
-
-async function saveProduct(msg) {
-
-  const userId = msg.from.id;
-
-  const session = getSession(userId);
-
-  const product = session.product;
-
-  const { data, error } = await supabase
-    .from("products")
-    .insert({
-      name: product.name,
-      price: product.price,
-      stock: product.stock,
-      description: product.description || null
-    })
-    .select("*")
-    .single();
-
-  if (error) {
-
-    console.error("add product:", error.message);
-
-    await bot.sendMessage(
-      msg.chat.id,
-      `❌ Product save failed.\n\n${error.message}`,
-      adminMenu()
-    );
-
-    clearSession(userId);
-
-    return;
-  }
-
-  clearSession(userId);
-
-  await bot.sendMessage(
-    msg.chat.id,
-
-    `✅ *Product Added Successfully!*
-
-🆔 ID: ${data.id}
-📦 Name: ${safeText(data.name)}
-💰 Price: ${money(data.price)}
-📊 Stock: ${data.stock}`,
-
-    {
-      parse_mode: "Markdown",
-      ...adminMenu()
-    }
-  );
-}
-
-
-/*
-========================================================
-BUY PRODUCT
-========================================================
-*/
-
-async function buyProduct(msg, productId) {
-
-  const product = await getProduct(productId);
-
-  if (!product) {
-
-    await bot.sendMessage(
-      msg.chat.id,
-      "❌ Product not found."
-    );
-
-    return;
-  }
-
-  const stock = Number(product.stock || 0);
-
-  if (stock <= 0) {
-
-    await bot.sendMessage(
-      msg.chat.id,
-      "❌ This product is out of stock."
-    );
-
-    return;
-  }
-
-  const user = await ensureUser(msg);
-
-  if (!user) {
-
-    await bot.sendMessage(
-      msg.chat.id,
-      "❌ Account setup failed."
-    );
-
-    return;
-  }
-
-  const { data: order, error } = await supabase
-    .from("orders")
-    .insert({
-      telegram_id: String(msg.from.id),
-      product_id: product.id,
-      amount: Number(product.price || 0),
-      status: "pending"
-    })
-    .select("*")
-    .single();
-
-  if (error) {
-
-    console.error("create order:", error.message);
-
-    await bot.sendMessage(
-      msg.chat.id,
-      "❌ Order could not be created."
-    );
-
-    return;
-  }
-
-  const newStock = stock - 1;
-
-  const { error: stockError } = await supabase
-    .from("products")
-    .update({
-      stock: newStock
-    })
-    .eq("id", product.id);
-
-  if (stockError) {
-
-    console.error("stock update:", stockError.message);
-
-    await bot.sendMessage(
-      msg.chat.id,
-      `⚠️ Order created, but stock update failed.\n\nOrder ID: ${order.id}`
-    );
-
-    return;
-  }
-
-  await bot.sendMessage(
-
-    msg.chat.id,
-
-    `✅ *Order Created!*
-
-🧾 Order ID: ${order.id}
-
-📦 Product:
-${safeText(product.name)}
-
-💰 Amount:
-${money(product.price)}
-
-📌 Status:
-Pending
-
-Please contact the seller for payment/delivery details.`,
-
-    {
-      parse_mode: "Markdown",
-      ...mainMenu(user.role === "admin")
-    }
-  );
-}
-
-
-/*
-========================================================
-CALLBACK QUERIES
-========================================================
-*/
-
-bot.on("callback_query", async (query) => {
+/* =========================================================
+   PROFILE
+========================================================= */
+
+async function sendProfile(chatId, user) {
 
   try {
 
-    const chatId = query.message.chat.id;
-    const userId = query.from.id;
+    const { data, error } = await supabase
+      .from("users")
+      .select("*")
+      .eq("telegram_id", String(user.id))
+      .maybeSingle();
 
-    await bot.answerCallbackQuery(query.id);
+    if (error) {
+      throw error;
+    }
 
-    const action = query.data;
-
-    const fakeMsg = {
-      chat: {
-        id: chatId
-      },
-      from: query.from
-    };
-
-
-    /*
-    ==============================
-    HOME
-    ==============================
-    */
-
-    if (action === "home") {
-
-      const admin = await isAdmin(fakeMsg);
+    if (!data) {
 
       await bot.sendMessage(
         chatId,
-        "🏠 *Main Menu*",
+        "👤 <b>My Profile</b>\n\n" +
+        "आपका account अभी database में नहीं मिला।",
         {
-          parse_mode: "Markdown",
-          ...mainMenu(admin)
+          parse_mode: "HTML",
+          ...backButton()
+        }
+      );
+
+      return;
+    }
+
+    const name =
+      data.first_name ??
+      data.username ??
+      user.first_name ??
+      "User";
+
+    const username =
+      data.username ??
+      user.username ??
+      "Not set";
+
+    const balance =
+      data.balance ??
+      0;
+
+    await bot.sendMessage(
+      chatId,
+
+      "👤 <b>MY PROFILE</b>\n\n" +
+
+      `👤 Name: <b>${escapeHtml(String(name))}</b>\n` +
+
+      `🆔 Telegram ID: <code>${escapeHtml(
+        String(user.id)
+      )}</code>\n` +
+
+      `📛 Username: @${escapeHtml(
+        String(username).replace("@", "")
+      )}\n\n` +
+
+      `💰 Balance: <b>${money(balance)}</b>\n\n` +
+
+      "━━━━━━━━━━━━━━━━━━",
+
+      {
+        parse_mode: "HTML",
+        ...backButton()
+      }
+    );
+
+  } catch (error) {
+
+    console.error("profile error:", error);
+
+    await bot.sendMessage(
+      chatId,
+      "❌ Profile load नहीं हो सका।\n\n" +
+      escapeHtml(error.message || "Unknown error"),
+      {
+        parse_mode: "HTML",
+        ...backButton()
+      }
+    );
+  }
+}
+
+
+/* =========================================================
+   SUPPORT
+========================================================= */
+
+async function sendSupport(chatId) {
+
+  await bot.sendMessage(
+    chatId,
+
+    "🆘 <b>SUPPORT</b>\n\n" +
+
+    "अगर आपको कोई problem आ रही है तो admin से contact करें.\n\n" +
+
+    "📩 <b>Support Admin</b>\n" +
+    "अपनी problem और Order ID भेजें।\n\n" +
+
+    "━━━━━━━━━━━━━━━━━━",
+
+    {
+      parse_mode: "HTML",
+      ...backButton()
+    }
+  );
+}
+
+
+/* =========================================================
+   HOW TO USE
+========================================================= */
+
+async function sendTutorial(chatId) {
+
+  await bot.sendMessage(
+    chatId,
+
+    "📖 <b>HOW TO USE</b>\n\n" +
+
+    "🛍 <b>Shop Now</b>\n" +
+    "Products देखने और purchase करने के लिए Shop Now दबाएँ।\n\n" +
+
+    "🧾 <b>My Orders</b>\n" +
+    "अपने पुराने orders और उनकी status देखने के लिए My Orders दबाएँ।\n\n" +
+
+    "👤 <b>Profile</b>\n" +
+    "अपना account और balance देखने के लिए Profile दबाएँ।\n\n" +
+
+    "🆘 <b>Support</b>\n" +
+    "किसी problem के लिए Support से contact करें।",
+
+    {
+      parse_mode: "HTML",
+      ...backButton()
+    }
+  );
+}
+
+
+/* =========================================================
+   MAIN MESSAGE HANDLER
+========================================================= */
+
+bot.on("message", async (msg) => {
+
+  try {
+
+    if (!msg || !msg.chat) {
+      return;
+    }
+
+    const chatId = msg.chat.id;
+    const user = msg.from;
+
+    if (!user) {
+      return;
+    }
+
+    const messageText =
+      String(msg.text || "").trim();
+
+    if (!messageText) {
+      return;
+    }
+
+
+    /* START */
+
+    if (messageText === "/start") {
+
+      await bot.sendMessage(
+        chatId,
+
+        "🛍 <b>Welcome to Trusted Seller Shop!</b>\n\n" +
+
+        "Bot successfully connected ✅\n\n" +
+
+        "नीचे menu से option select करें:",
+
+        {
+          parse_mode: "HTML",
+          ...mainMenu(false)
         }
       );
 
@@ -1160,13 +1025,114 @@ bot.on("callback_query", async (query) => {
     }
 
 
-    /*
-    ==============================
-    PRODUCTS
-    ==============================
-    */
+    /* SUPPORT COMMAND */
 
-    if (action === "products") {
+    if (messageText === "/support") {
+
+      await sendSupport(chatId);
+
+      return;
+    }
+
+
+    /* ORDERS COMMAND */
+
+    if (messageText === "/orders") {
+
+      await sendOrders(chatId, user);
+
+      return;
+    }
+
+
+    /* PROFILE COMMAND */
+
+    if (messageText === "/profile") {
+
+      await sendProfile(chatId, user);
+
+      return;
+    }
+
+
+    /* UNKNOWN TEXT */
+
+    await bot.sendMessage(
+      chatId,
+
+      "👇 <b>Menu से कोई option select करें।</b>",
+
+      {
+        parse_mode: "HTML",
+        ...mainMenu(false)
+      }
+    );
+
+  } catch (error) {
+
+    console.error(
+      "message handler error:",
+      error
+    );
+
+  }
+
+});
+
+
+/* =========================================================
+   CALLBACK QUERY HANDLER
+========================================================= */
+
+bot.on("callback_query", async (query) => {
+
+  try {
+
+    const chatId =
+      query.message?.chat?.id;
+
+    const user =
+      query.from;
+
+    const action =
+      String(query.data || "");
+
+    if (!chatId || !user) {
+      return;
+    }
+
+
+    await bot.answerCallbackQuery(
+      query.id
+    );
+
+
+    /* HOME */
+
+    if (action === "home") {
+
+      await bot.sendMessage(
+        chatId,
+
+        "🏠 <b>Main Menu</b>\n\n" +
+        "नीचे से कोई option select करें:",
+
+        {
+          parse_mode: "HTML",
+          ...mainMenu(false)
+        }
+      );
+
+      return;
+    }
+
+
+    /* PRODUCTS / SHOP */
+
+    if (
+      action === "products" ||
+      action === "shop"
+    ) {
 
       await sendProducts(chatId);
 
@@ -1174,60 +1140,71 @@ bot.on("callback_query", async (query) => {
     }
 
 
-    /*
-    ==============================
-    ACCOUNT
-    ==============================
-    */
+    /* ORDERS */
 
-    if (action === "account") {
+    if (
+      action === "orders" ||
+      action === "my_orders"
+    ) {
 
-      await sendAccount(fakeMsg);
-
-      return;
-    }
-
-
-    /*
-    ==============================
-    ORDERS
-    ==============================
-    */
-
-    if (action === "help") {
-
-      await sendHelp(chatId);
+      await sendOrders(
+        chatId,
+        user
+      );
 
       return;
     }
 
 
-    /*
-    ==============================
-    ADMIN PANEL
-    ==============================
-    */
+    /* PROFILE / ACCOUNT */
 
-    if (action === "admin") {
+    if (
+      action === "profile" ||
+      action === "account"
+    ) {
 
-      const admin = await isAdmin(fakeMsg);
+      await sendProfile(
+        chatId,
+        user
+      );
 
-      if (!admin) {
+      return;
+    }
 
-        await bot.sendMessage(
-          chatId,
-          "❌ Admin access required."
-        );
 
-        return;
-      }
+    /* SUPPORT */
+
+    if (action === "support") {
+
+      await sendSupport(chatId);
+
+      return;
+    }
+
+
+    /* TUTORIAL */
+
+    if (
+      action === "tutorial" ||
+      action === "how_to_use"
+    ) {
+
+      await sendTutorial(chatId);
+
+      return;
+    }
+
+
+    /* BACK */
+
+    if (action === "back") {
 
       await bot.sendMessage(
         chatId,
-        "⚙️ *Admin Panel*",
+        "🏠 <b>Main Menu</b>",
         {
-          parse_mode: "Markdown",
-          ...adminMenu()
+          parse_mode: "HTML",
+          ...mainMenu(false)
         }
       );
 
@@ -1235,323 +1212,36 @@ bot.on("callback_query", async (query) => {
     }
 
 
-    /*
-    ==============================
-    ADMIN DASHBOARD
-    ==============================
-    */
-
-    if (action === "admin_dashboard") {
-
-      const admin = await isAdmin(fakeMsg);
-
-      if (!admin) return;
-
-      await adminDashboard(chatId);
-
-      return;
-    }
-
-
-    /*
-    ==============================
-    ADMIN PRODUCTS
-    ==============================
-    */
-
-    if (action === "admin_products") {
-
-      const admin = await isAdmin(fakeMsg);
-
-      if (!admin) return;
-
-      await adminProducts(chatId);
-
-      return;
-    }
-
-
-    /*
-    ==============================
-    ADMIN CUSTOMERS
-    ==============================
-    */
-
-    if (action === "admin_customers") {
-
-      const admin = await isAdmin(fakeMsg);
-
-      if (!admin) return;
-
-      await adminCustomers(chatId);
-
-      return;
-    }
-
-
-    /*
-    ==============================
-    ADMIN ORDERS
-    ==============================
-    */
-
-    if (action === "admin_orders") {
-
-      const admin = await isAdmin(fakeMsg);
-
-      if (!admin) return;
-
-      await adminOrders(chatId);
-
-      return;
-    }
-
-
-    /*
-    ==============================
-    ADD PRODUCT
-    ==============================
-    */
-
-    if (action === "admin_add_product") {
-
-      await startAddProduct(fakeMsg);
-
-      return;
-    }
-
-
-    /*
-    ==============================
-    BUY
-    ==============================
-    */
-
-    if (action.startsWith("buy_")) {
-
-      const productId =
-        action.replace("buy_", "");
-
-      await buyProduct(
-        fakeMsg,
-        productId
-      );
-
-      return;
-    }
+    console.log(
+      "Unknown callback:",
+      action
+    );
 
   } catch (error) {
 
     console.error(
-      "Callback error:",
-      error
-    );
-  }
-});
-
-
-/*
-========================================================
-TEXT INPUT HANDLER
-========================================================
-*/
-
-bot.on("message", async (msg) => {
-
-  try {
-
-    if (!msg.text) {
-      return;
-    }
-
-    const text = msg.text.trim();
-
-    /*
-    Ignore commands
-    */
-
-    if (text.startsWith("/")) {
-      return;
-    }
-
-    const userId = msg.from.id;
-
-    const session = getSession(userId);
-
-    if (!session.mode) {
-      return;
-    }
-
-
-    /*
-    ==============================
-    ADD PRODUCT - NAME
-    ==============================
-    */
-
-    if (session.mode === "add_product_name") {
-
-      if (text.length < 1) {
-
-        await bot.sendMessage(
-          msg.chat.id,
-          "❌ Please send a product name."
-        );
-
-        return;
-      }
-
-      session.product.name = text;
-
-      session.mode = "add_product_price";
-
-      await bot.sendMessage(
-        msg.chat.id,
-        "💰 Product price भेजो:\n\nExample: 499"
-      );
-
-      return;
-    }
-
-
-    /*
-    ==============================
-    ADD PRODUCT - PRICE
-    ==============================
-    */
-
-    if (session.mode === "add_product_price") {
-
-      const price = Number(text);
-
-      if (
-        !Number.isFinite(price) ||
-        price < 0
-      ) {
-
-        await bot.sendMessage(
-          msg.chat.id,
-          "❌ सही price डालो.\n\nExample: 499"
-        );
-
-        return;
-      }
-
-      session.product.price = price;
-
-      session.mode = "add_product_stock";
-
-      await bot.sendMessage(
-        msg.chat.id,
-        "📦 Product stock भेजो:\n\nExample: 10"
-      );
-
-      return;
-    }
-
-
-    /*
-    ==============================
-    ADD PRODUCT - STOCK
-    ==============================
-    */
-
-    if (session.mode === "add_product_stock") {
-
-      const stock = Number(text);
-
-      if (
-        !Number.isInteger(stock) ||
-        stock < 0
-      ) {
-
-        await bot.sendMessage(
-          msg.chat.id,
-          "❌ सही stock डालो.\n\nExample: 10"
-        );
-
-        return;
-      }
-
-      session.product.stock = stock;
-
-      session.mode = "add_product_description";
-
-      await bot.sendMessage(
-        msg.chat.id,
-        "📝 Product description भेजो.\n\nअगर description नहीं चाहिए तो `skip` लिखो."
-      );
-
-      return;
-    }
-
-
-    /*
-    ==============================
-    ADD PRODUCT - DESCRIPTION
-    ==============================
-    */
-
-    if (
-      session.mode ===
-      "add_product_description"
-    ) {
-
-      if (
-        text.toLowerCase() ===
-        "skip"
-      ) {
-
-        session.product.description = null;
-
-      } else {
-
-        session.product.description = text;
-      }
-
-      await saveProduct(msg);
-
-      return;
-    }
-
-  } catch (error) {
-
-    console.error(
-      "Text handler error:",
+      "callback_query error:",
       error
     );
 
-    await bot.sendMessage(
-      msg.chat.id,
-      "❌ Something went wrong."
-    );
   }
+
 });
 
 
-/*
-========================================================
-POLLING ERROR
-========================================================
-*/
+/* =========================================================
+   BOT ERROR HANDLING
+========================================================= */
 
-bot.on(
-  "polling_error",
-  (error) => {
+bot.on("polling_error", (error) => {
 
-    console.error(
-      "Telegram polling error:",
-      error.message
-    );
-  }
-);
+  console.error(
+    "Telegram polling error:",
+    error.message
+  );
 
+});
 
-/*
-========================================================
-UNHANDLED REJECTION
-========================================================
-*/
 
 process.on(
   "unhandledRejection",
@@ -1561,15 +1251,10 @@ process.on(
       "Unhandled rejection:",
       error
     );
+
   }
 );
 
-
-/*
-========================================================
-UNCAUGHT EXCEPTION
-========================================================
-*/
 
 process.on(
   "uncaughtException",
@@ -1579,15 +1264,14 @@ process.on(
       "Uncaught exception:",
       error
     );
+
   }
 );
 
 
-/*
-========================================================
-START BOT
-========================================================
-*/
+/* =========================================================
+   START BOT
+========================================================= */
 
 console.log(
   "🤖 Telegram Shop Bot is starting..."
@@ -1595,4 +1279,4 @@ console.log(
 
 console.log(
   "✅ Bot is running."
-);
+)

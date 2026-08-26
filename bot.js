@@ -143,6 +143,32 @@ function referralCode(userId) {
 ================================================== */
 
 function mainMenu(isAdmin = false) {
+  return {
+    reply_markup: {
+      keyboard: [
+        [
+          "🛒 Shop Now"
+        ],
+        [
+          "📦 My Orders",
+          "👤 Profile"
+        ],
+        [
+          "💎 Upgrade to Reseller"
+        ],
+        [
+          "❓ How to Use",
+          "🚨 Support"
+        ],
+        [
+          "🎁 Refer & Earn"
+        ]
+      ],
+      resize_keyboard: true,
+      one_time_keyboard: false
+    }
+  };
+}
   const keyboard = [
     [
       {

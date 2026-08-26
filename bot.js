@@ -1,23 +1,33 @@
-import { Telegraf, Markup } from "telegraf";
+import TelegramBot from "node-telegram-bot-api";
 import { createClient } from "@supabase/supabase-js";
-import http from "http";
 
-/* =========================
-   ENVIRONMENT
-========================= */
+/*
+========================================
+ENVIRONMENT VARIABLES
+========================================
+
+BOT_TOKEN
+SUPABASE_URL
+SUPABASE_SECRET_KEY
+ADMIN_EMAIL
+
+Example:
+
+BOT_TOKEN=123456:ABC...
+SUPABASE_URL=https://xxxxx.supabase.co
+SUPABASE_SECRET_KEY=xxxxx
+ADMIN_EMAIL=your@email.com
+*/
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
-
 const SUPABASE_URL = process.env.SUPABASE_URL;
-
 const SUPABASE_KEY =
   process.env.SUPABASE_SECRET_KEY ||
   process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-const ADMIN_ID = String(process.env.ADMIN_ID || "");
-
-const SUPPORT_USERNAME =
-  process.env.SUPPORT_USERNAME || "trusted_seller_support";
+const ADMIN_EMAIL = String(
+  process.env.ADMIN_EMAIL || ""
+).trim().toLowerCase();
 
 if (!BOT_TOKEN) {
   throw new Error("BOT_TOKEN is missing");
@@ -31,73 +41,137 @@ if (!SUPABASE_KEY) {
   throw new Error("SUPABASE_SECRET_KEY is missing");
 }
 
-/* =========================
-   CLIENTS
-========================= */
+if (!ADMIN_EMAIL) {
+  throw new Error("ADMIN_EMAIL is missing");
+}
 
-const bot = new Telegraf(BOT_TOKEN);
+
+/*
+========================================
+CLIENTS
+========================================
+*/
+
+const bot = new TelegramBot(BOT_TOKEN, {
+  polling: true
+});
 
 const supabase = createClient(
   SUPABASE_URL,
-  SUPABASE_KEY,
-  {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-      detectSessionInUrl: false
-    }
-  }
+  SUPABASE_KEY
 );
 
-/* =========================
-   SIMPLE SESSION
-========================= */
+
+/*
+========================================
+SESSIONS
+========================================
+*/
 
 const sessions = new Map();
 
-function session(id) {
-  if (!sessions.has(id)) {
-    sessions.set(id, {});
+function getSession(userId) {
+  if (!sessions.has(userId)) {
+    sessions.set(userId, {
+      mode: null,
+      product: {}
+    });
   }
 
-  return sessions.get(id);
+  return sessions.get(userId);
 }
 
-function clearSession(id) {
-  sessions.delete(id);
+function clearSession(userId) {
+  sessions.delete(userId);
 }
 
-/* =========================
-   HELPERS
-========================= */
 
-function isAdmin(ctx) {
-  return ADMIN_ID &&
-    String(ctx.from.id) === ADMIN_ID;
-}
+/*
+========================================
+HELPERS
+========================================
+*/
 
 function money(value) {
   return `₹${Number(value || 0).toFixed(2)}`;
 }
 
-async function ensureUser(ctx) {
+function mainMenu(isAdmin = false) {
+  const keyboard = [
+    [
+      {
+        text: "🛍 Products",
+        callback_data: "products"
+      }
+    ],
+    [
+      {
+        text: "👤 My Account",
+        callback_data: "account"
+      }
+    ]
+  ];
 
-  const telegramId = ctx.from.id;
+  if (isAdmin) {
+    keyboard.push([
+      {
+        text: "⚙️ Admin Panel",
+        callback_data: "admin"
+      }
+    ]);
+  }
 
-  const username =
-    ctx.from.username || null;
+  return {
+    reply_markup: {
+      inline_keyboard: keyboard
+    }
+  };
+}
 
-  const firstName =
-    ctx.from.first_name || "Customer";
+
+/*
+========================================
+USER
+========================================
+*/
+
+async function getUser(telegramId) {
+  const { data, error } = await supabase
+    .from("users")
+    .select("*")
+    .eq("telegram_id", telegramId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("getUser:", error);
+    return null;
+  }
+
+  return data;
+}
+
+
+async function saveUser(ctx, email) {
+  const telegramId = String(ctx.from.id);
+
+  const cleanEmail = String(email)
+    .trim()
+    .toLowerCase();
+
+  const role =
+    cleanEmail === ADMIN_EMAIL
+      ? "admin"
+      : "customer";
 
   const { data, error } = await supabase
     .from("users")
     .upsert(
       {
         telegram_id: telegramId,
-        username,
-        first_name: firstName,
-        role: isAdmin(ctx) ? "admin" : "customer"
+        username: ctx.from.username || null,
+        first_name: ctx.from.first_name || null,
+        email: cleanEmail,
+        role: role
       },
       {
         onConflict: "telegram_id"
@@ -107,1071 +181,885 @@ async function ensureUser(ctx) {
     .single();
 
   if (error) {
-    console.error("User error:", error);
+    console.error("saveUser:", error);
     return null;
   }
 
   return data;
 }
 
-/* =========================
-   MAIN MENU
-========================= */
 
-function mainMenu(ctx) {
+async function isAdmin(ctx) {
+  const user = await getUser(
+    String(ctx.from.id)
+  );
 
-  const buttons = [
-    [
-      Markup.button.callback(
-        "🛒 Products",
-        "products"
-      )
-    ],
-    [
-      Markup.button.callback(
-        "📦 My Orders",
-        "myorders"
-      ),
-      Markup.button.callback(
-        "👤 My Account",
-        "account"
-      )
-    ],
-    [
-      Markup.button.url(
-        "💬 Support",
-        `https://t.me/${SUPPORT_USERNAME.replace("@", "")}`
-      )
-    ]
-  ];
-
-  if (isAdmin(ctx)) {
-    buttons.push([
-      Markup.button.callback(
-        "⚙️ Admin Panel",
-        "admin"
-      )
-    ]);
+  if (!user) {
+    return false;
   }
 
-  return Markup.inlineKeyboard(buttons);
+  return (
+    String(user.email || "")
+      .trim()
+      .toLowerCase() === ADMIN_EMAIL
+  );
 }
 
-/* =========================
-   START
-========================= */
 
-bot.start(async (ctx) => {
+/*
+========================================
+START
+========================================
+*/
 
-  await ensureUser(ctx);
+bot.onText(/^\/start$/, async (msg) => {
+  const userId = String(msg.from.id);
 
-  await ctx.reply(
-    `🛍️ TRUSTED SELLER SHOP
+  const user = await getUser(userId);
 
-Welcome ${ctx.from.first_name || ""} 👋
+  if (!user) {
+    sessions.set(userId, {
+      mode: "email",
+      product: {}
+    });
 
-Choose an option below:`,
-    mainMenu(ctx)
+    await bot.sendMessage(
+      msg.chat.id,
+      "👋 Welcome!\n\n" +
+      "Please enter your email address to continue."
+    );
+
+    return;
+  }
+
+  const admin = await isAdmin({
+    from: msg.from
+  });
+
+  await bot.sendMessage(
+    msg.chat.id,
+    "🏠 Welcome back!\n\n" +
+    "Choose an option below:",
+    mainMenu(admin)
   );
 });
 
-/* =========================
-   ID COMMAND
-========================= */
 
-bot.command("id", async (ctx) => {
+/*
+========================================
+PRODUCT LIST
+========================================
+*/
 
-  await ctx.reply(
-    `🆔 Your Telegram ID:
-
-${ctx.from.id}
-
-Use this ID as ADMIN_ID in Render if this is your admin account.`
-  );
-
-});
-
-/* =========================
-   MENU
-========================= */
-
-bot.command("menu", async (ctx) => {
-
-  await ensureUser(ctx);
-
-  await ctx.reply(
-    "🛍️ SHOP MENU",
-    mainMenu(ctx)
-  );
-
-});
-
-/* =========================
-   PRODUCTS
-========================= */
-
-async function showProducts(ctx) {
-
+async function showProducts(chatId) {
   const { data, error } = await supabase
     .from("products")
     .select("*")
-    .eq("active", true)
-    .order("created_at", {
+    .order("id", {
       ascending: false
     });
 
   if (error) {
-    console.error(error);
-    return ctx.reply(
-      "❌ Products load नहीं हो पाए।"
+    console.error("products:", error);
+
+    await bot.sendMessage(
+      chatId,
+      "❌ Products load नहीं हो सके."
     );
+
+    return;
   }
 
   if (!data || data.length === 0) {
-    return ctx.reply(
-      "📦 अभी कोई product available नहीं है।"
-    );
-  }
-
-  const buttons = data.map(product => {
-
-    const stockText =
-      product.stock > 0
-        ? `🟢 ${product.stock} left`
-        : "🔴 Out of stock";
-
-    return [
-      Markup.button.callback(
-        `${product.name} • ${money(product.price)} • ${stockText}`,
-        `product:${product.id}`
-      )
-    ];
-  });
-
-  buttons.push([
-    Markup.button.callback(
-      "🏠 Main Menu",
-      "home"
-    )
-  ]);
-
-  await ctx.reply(
-    "🛒 AVAILABLE PRODUCTS",
-    Markup.inlineKeyboard(buttons)
-  );
-}
-
-bot.action("products", async (ctx) => {
-
-  await ctx.answerCbQuery();
-
-  await showProducts(ctx);
-});
-
-/* =========================
-   PRODUCT DETAILS
-========================= */
-
-bot.action(/^product:(.+)$/, async (ctx) => {
-
-  await ctx.answerCbQuery();
-
-  const productId = ctx.match[1];
-
-  const { data: product, error } =
-    await supabase
-      .from("products")
-      .select("*")
-      .eq("id", productId)
-      .eq("active", true)
-      .single();
-
-  if (error || !product) {
-    return ctx.reply(
-      "❌ Product नहीं मिला।"
-    );
-  }
-
-  const stock =
-    product.stock > 0
-      ? `🟢 ${product.stock} available`
-      : "🔴 Out of stock";
-
-  const text =
-`📦 ${product.name}
-
-${product.description || "No description"}
-
-💰 Price: ${money(product.price)}
-📦 Stock: ${stock}`;
-
-  const buttons = [];
-
-  if (product.stock > 0) {
-    buttons.push([
-      Markup.button.callback(
-        "🛒 Buy Now",
-        `buy:${product.id}`
-      )
-    ]);
-  }
-
-  buttons.push([
-    Markup.button.callback(
-      "🔙 Products",
-      "products"
-    )
-  ]);
-
-  await ctx.reply(
-    text,
-    Markup.inlineKeyboard(buttons)
-  );
-});
-
-/* =========================
-   BUY
-========================= */
-
-bot.action(/^buy:(.+)$/, async (ctx) => {
-
-  await ctx.answerCbQuery();
-
-  const productId = ctx.match[1];
-
-  await ensureUser(ctx);
-
-  const { data: orderId, error } =
-    await supabase.rpc(
-      "create_shop_order",
-      {
-        p_telegram_id: ctx.from.id,
-        p_product_id: productId
-      }
+    await bot.sendMessage(
+      chatId,
+      "📦 अभी कोई product available नहीं है."
     );
 
-  if (error) {
-
-    console.error("Order error:", error);
-
-    if (
-      error.message?.includes("OUT_OF_STOCK")
-    ) {
-      return ctx.reply(
-        "❌ यह product अभी out of stock है।"
-      );
-    }
-
-    return ctx.reply(
-      "❌ Order create नहीं हो पाया।"
-    );
+    return;
   }
 
-  await ctx.reply(
-`✅ ORDER CREATED
-
-🧾 Order ID:
-${orderId}
-
-📌 Status: Pending
-
-Admin आपका order verify करेगा।`,
-    Markup.inlineKeyboard([
-      [
-        Markup.button.callback(
-          "📦 My Orders",
-          "myorders"
-        )
-      ],
-      [
-        Markup.button.callback(
-          "🏠 Home",
-          "home"
-        )
-      ]
-    ])
-  );
-});
-
-/* =========================
-   MY ORDERS
-========================= */
-
-bot.action("myorders", async (ctx) => {
-
-  await ctx.answerCbQuery();
-
-  const { data: user } =
-    await supabase
-      .from("users")
-      .select("id")
-      .eq("telegram_id", ctx.from.id)
-      .single();
-
-  if (!user) {
-    return ctx.reply(
-      "❌ Account नहीं मिला। /start दबाएँ।"
-    );
-  }
-
-  const { data: orders, error } =
-    await supabase
-      .from("orders")
-      .select(`
-        id,
-        total,
-        status,
-        created_at,
-        order_items (
-          product_name,
-          price,
-          quantity
-        )
-      `)
-      .eq("user_id", user.id)
-      .order("created_at", {
-        ascending: false
-      })
-      .limit(20);
-
-  if (error) {
-    console.error(error);
-    return ctx.reply(
-      "❌ Orders load नहीं हो पाए।"
-    );
-  }
-
-  if (!orders?.length) {
-    return ctx.reply(
-      "📦 आपने अभी कोई order नहीं किया।"
-    );
-  }
-
-  let text = "📦 MY ORDERS\n\n";
-
-  for (const order of orders) {
-
-    const item =
-      order.order_items?.[0];
-
-    text +=
-`🧾 ${order.id.slice(0, 8)}
-📦 ${item?.product_name || "Product"}
-💰 ${money(order.total)}
-📌 ${order.status.toUpperCase()}
-📅 ${new Date(order.created_at).toLocaleString("en-IN")}
-
-`;
-  }
-
-  await ctx.reply(
-    text,
-    Markup.inlineKeyboard([
-      [
-        Markup.button.callback(
-          "🏠 Home",
-          "home"
-        )
-      ]
-    ])
-  );
-});
-
-/* =========================
-   ACCOUNT
-========================= */
-
-bot.action("account", async (ctx) => {
-
-  await ctx.answerCbQuery();
-
-  const { data: user, error } =
-    await supabase
-      .from("users")
-      .select("*")
-      .eq("telegram_id", ctx.from.id)
-      .single();
-
-  if (error || !user) {
-    return ctx.reply(
-      "❌ Account नहीं मिला।"
-    );
-  }
-
-  const { count } =
-    await supabase
-      .from("orders")
-      .select("*", {
-        count: "exact",
-        head: true
-      })
-      .eq("user_id", user.id);
-
-  await ctx.reply(
-`👤 MY ACCOUNT
-
-Name: ${user.first_name || "-"}
-Username: ${user.username ? "@" + user.username : "-"}
-Telegram ID: ${user.telegram_id}
-Email: ${user.email || "Not added"}
-Orders: ${count || 0}`,
-    Markup.inlineKeyboard([
-      [
-        Markup.button.callback(
-          "📧 Add / Change Email",
-          "setemail"
-        )
-      ],
-      [
-        Markup.button.callback(
-          "🏠 Home",
-          "home"
-        )
-      ]
-    ])
-  );
-});
-
-/* =========================
-   EMAIL
-========================= */
-
-bot.action("setemail", async (ctx) => {
-
-  await ctx.answerCbQuery();
-
-  const s = session(ctx.from.id);
-
-  s.mode = "email";
-
-  await ctx.reply(
-    "📧 अपना Gmail/email भेजो:\n\nExample:\naditya@gmail.com"
-  );
-});
-
-/* =========================
-   ADMIN PANEL
-========================= */
-
-function adminMenu() {
-
-  return Markup.inlineKeyboard([
-    [
-      Markup.button.callback(
-        "➕ Add Product",
-        "admin:add"
-      )
-    ],
-    [
-      Markup.button.callback(
-        "📦 Manage Products",
-        "admin:products"
-      )
-    ],
-    [
-      Markup.button.callback(
-        "📋 Orders",
-        "admin:orders"
-      )
-    ],
-    [
-      Markup.button.callback(
-        "📊 Sales",
-        "admin:sales"
-      )
-    ],
-    [
-      Markup.button.callback(
-        "👥 Customers",
-        "admin:customers"
-      )
-    ],
-    [
-      Markup.button.callback(
-        "🏠 Main Menu",
-        "home"
-      )
-    ]
-  ]);
-}
-
-bot.action("admin", async (ctx) => {
-
-  await ctx.answerCbQuery();
-
-  if (!isAdmin(ctx)) {
-    return ctx.reply(
-      "⛔ Admin access denied."
-    );
-  }
-
-  await ctx.reply(
-    "⚙️ ADMIN PANEL",
-    adminMenu()
-  );
-});
-
-/* =========================
-   ADMIN ADD PRODUCT
-========================= */
-
-bot.action("admin:add", async (ctx) => {
-
-  await ctx.answerCbQuery();
-
-  if (!isAdmin(ctx)) return;
-
-  const s = session(ctx.from.id);
-
-  s.mode = "add_name";
-  s.product = {};
-
-  await ctx.reply(
-    "➕ ADD PRODUCT\n\nProduct का नाम भेजो:"
-  );
-});
-
-/* =========================
-   ADMIN PRODUCTS
-========================= */
-
-bot.action("admin:products", async (ctx) => {
-
-  await ctx.answerCbQuery();
-
-  if (!isAdmin(ctx)) return;
-
-  const { data: products, error } =
-    await supabase
-      .from("products")
-      .select("*")
-      .order("created_at", {
-        ascending: false
-      });
-
-  if (error) {
-    console.error(error);
-    return ctx.reply(
-      "❌ Products load नहीं हुए।"
-    );
-  }
-
-  if (!products?.length) {
-    return ctx.reply(
-      "📦 कोई product नहीं है।",
-      adminMenu()
-    );
-  }
-
-  for (const p of products) {
-
-    await ctx.reply(
-`📦 ${p.name}
-
-💰 ${money(p.price)}
-📦 Stock: ${p.stock}
-Status: ${p.active ? "🟢 Active" : "🔴 Disabled"}`,
-      Markup.inlineKeyboard([
-        [
-          Markup.button.callback(
-            "🗑️ Delete",
-            `delp:${p.id}`
-          ),
-          Markup.button.callback(
-            "📦 Stock",
-            `stock:${p.id}`
-          )
-        ],
-        [
-          Markup.button.callback(
-            "💰 Price",
-            `price:${p.id}`
-          )
-        ]
-      ])
-    );
-  }
-
-});
-
-/* =========================
-   DELETE PRODUCT
-========================= */
-
-bot.action(/^delp:(.+)$/, async (ctx) => {
-
-  await ctx.answerCbQuery();
-
-  if (!isAdmin(ctx)) return;
-
-  const productId = ctx.match[1];
-
-  const { error } =
-    await supabase
-      .from("products")
-      .update({
-        active: false
-      })
-      .eq("id", productId);
-
-  if (error) {
-    console.error(error);
-    return ctx.reply(
-      "❌ Delete नहीं हुआ।"
-    );
-  }
-
-  await ctx.reply(
-    "🗑️ Product successfully removed from shop."
-  );
-});
-
-/* =========================
-   STOCK
-========================= */
-
-bot.action(/^stock:(.+)$/, async (ctx) => {
-
-  await ctx.answerCbQuery();
-
-  if (!isAdmin(ctx)) return;
-
-  const s = session(ctx.from.id);
-
-  s.mode = "stock";
-  s.productId = ctx.match[1];
-
-  await ctx.reply(
-    "📦 नया stock quantity भेजो:\n\nExample: 25"
-  );
-});
-
-/* =========================
-   PRICE
-========================= */
-
-bot.action(/^price:(.+)$/, async (ctx) => {
-
-  await ctx.answerCbQuery();
-
-  if (!isAdmin(ctx)) return;
-
-  const s = session(ctx.from.id);
-
-  s.mode = "price";
-  s.productId = ctx.match[1];
-
-  await ctx.reply(
-    "💰 नया price भेजो:\n\nExample: 499"
-  );
-});
-
-/* =========================
-   ADMIN ORDERS
-========================= */
-
-bot.action("admin:orders", async (ctx) => {
-
-  await ctx.answerCbQuery();
-
-  if (!isAdmin(ctx)) return;
-
-  const { data: orders, error } =
-    await supabase
-      .from("orders")
-      .select(`
-        id,
-        total,
-        status,
-        created_at,
-        users (
-          telegram_id,
-          username,
-          first_name
-        ),
-        order_items (
-          product_name,
-          price,
-          quantity
-        )
-      `)
-      .order("created_at", {
-        ascending: false
-      })
-      .limit(30);
-
-  if (error) {
-    console.error(error);
-    return ctx.reply(
-      "❌ Orders load नहीं हुए।"
-    );
-  }
-
-  if (!orders?.length) {
-    return ctx.reply(
-      "📋 अभी कोई order नहीं है।"
-    );
-  }
-
-  for (const order of orders) {
-
-    const item =
-      order.order_items?.[0];
-
-    const user =
-      order.users;
-
-    let text =
-`🧾 ORDER
-
-ID: ${order.id}
-Product: ${item?.product_name || "-"}
-Price: ${money(order.total)}
-
-Customer:
-${user?.first_name || "-"}
-${user?.username ? "@" + user.username : ""}
-Telegram ID: ${user?.telegram_id || "-"}
-
-Status: ${order.status}`;
+  for (const product of data) {
+    const stock =
+      Number(product.stock || 0);
+
+    const text =
+      `📦 ${product.name}\n\n` +
+      `${product.description || "No description"}\n\n` +
+      `💰 Price: ${money(product.price)}\n` +
+      `📊 Stock: ${stock}`;
 
     const buttons = [];
 
-    if (order.status === "pending") {
-
+    if (stock > 0) {
       buttons.push([
-        Markup.button.callback(
-          "✅ Confirm",
-          `confirm:${order.id}`
-        ),
-        Markup.button.callback(
-          "❌ Cancel",
-          `cancel:${order.id}`
-        )
+        {
+          text: "🛒 Buy",
+          callback_data:
+            `buy_${product.id}`
+        }
       ]);
-
     }
 
-    await ctx.reply(
+    await bot.sendMessage(
+      chatId,
       text,
-      buttons.length
-        ? Markup.inlineKeyboard(buttons)
-        : undefined
+      {
+        reply_markup: {
+          inline_keyboard: buttons
+        }
+      }
     );
   }
+}
 
-});
 
-/* =========================
-   CONFIRM ORDER
-========================= */
+/*
+========================================
+ADMIN MENU
+========================================
+*/
 
-bot.action(/^confirm:(.+)$/, async (ctx) => {
-
-  await ctx.answerCbQuery();
-
-  if (!isAdmin(ctx)) return;
-
-  const orderId = ctx.match[1];
-
-  const { error } =
-    await supabase
-      .from("orders")
-      .update({
-        status: "confirmed"
-      })
-      .eq("id", orderId)
-      .eq("status", "pending");
-
-  if (error) {
-    console.error(error);
-    return ctx.reply(
-      "❌ Order confirm नहीं हुआ।"
-    );
-  }
-
-  await ctx.reply(
-    `✅ Order confirmed\n\n${orderId}`
-  );
-});
-
-/* =========================
-   CANCEL ORDER
-========================= */
-
-bot.action(/^cancel:(.+)$/, async (ctx) => {
-
-  await ctx.answerCbQuery();
-
-  if (!isAdmin(ctx)) return;
-
-  const orderId = ctx.match[1];
-
-  const { data: order } =
-    await supabase
-      .from("orders")
-      .select("status")
-      .eq("id", orderId)
-      .single();
-
-  if (!order) {
-    return ctx.reply(
-      "❌ Order नहीं मिला।"
-    );
-  }
-
-  if (order.status !== "pending") {
-    return ctx.reply(
-      "⚠️ यह order पहले ही process हो चुका है।"
-    );
-  }
-
-  const { data: items } =
-    await supabase
-      .from("order_items")
-      .select("product_id, quantity")
-      .eq("order_id", orderId);
-
-  for (const item of items || []) {
-
-    if (!item.product_id) continue;
-
-    const { data: product } =
-      await supabase
-        .from("products")
-        .select("stock")
-        .eq("id", item.product_id)
-        .single();
-
-    if (product) {
-
-      await supabase
-        .from("products")
-        .update({
-          stock:
-            product.stock + item.quantity,
-          updated_at: new Date().toISOString()
-        })
-        .eq("id", item.product_id);
+async function showAdminMenu(chatId) {
+  await bot.sendMessage(
+    chatId,
+    "⚙️ ADMIN PANEL",
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: "➕ Add Product",
+              callback_data: "add_product"
+            }
+          ],
+          [
+            {
+              text: "📦 Products",
+              callback_data: "products"
+            }
+          ],
+          [
+            {
+              text: "📊 Dashboard",
+              callback_data: "dashboard"
+            }
+          ],
+          [
+            {
+              text: "👥 Customers",
+              callback_data: "customers"
+            }
+          ],
+          [
+            {
+              text: "🏠 Main Menu",
+              callback_data: "home"
+            }
+          ]
+        ]
+      }
     }
+  );
+}
+
+
+/*
+========================================
+DASHBOARD
+========================================
+*/
+
+async function showDashboard(chatId) {
+  const { data: products } = await supabase
+    .from("products")
+    .select("id,stock,price");
+
+  const { count: customers } = await supabase
+    .from("users")
+    .select("*", {
+      count: "exact",
+      head: true
+    })
+    .eq("role", "customer");
+
+  let totalProducts = 0;
+  let totalStock = 0;
+
+  for (const product of products || []) {
+    totalProducts++;
+
+    totalStock += Number(
+      product.stock || 0
+    );
   }
 
-  const { error } =
-    await supabase
-      .from("orders")
-      .update({
-        status: "cancelled"
-      })
-      .eq("id", orderId);
+  await bot.sendMessage(
+    chatId,
+    "📊 SALES DASHBOARD\n\n" +
+    `📦 Total Products: ${totalProducts}\n` +
+    `📊 Total Stock: ${totalStock}\n` +
+    `👥 Customers: ${customers || 0}`,
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: "⚙️ Admin Panel",
+              callback_data: "admin"
+            }
+          ]
+        ]
+      }
+    }
+  );
+}
+
+
+/*
+========================================
+CUSTOMERS
+========================================
+*/
+
+async function showCustomers(chatId) {
+  const { data, error } = await supabase
+    .from("users")
+    .select(
+      "telegram_id,username,first_name,email,role"
+    )
+    .eq("role", "customer")
+    .order("telegram_id", {
+      ascending: false
+    })
+    .limit(50);
 
   if (error) {
     console.error(error);
-    return ctx.reply(
-      "❌ Order cancel नहीं हुआ।"
+
+    await bot.sendMessage(
+      chatId,
+      "❌ Customers load नहीं हो सके."
     );
+
+    return;
   }
 
-  await ctx.reply(
-    `❌ Order cancelled\n\n${orderId}\n\nStock restored.`
-  );
-});
-
-/* =========================
-   SALES
-========================= */
-
-bot.action("admin:sales", async (ctx) => {
-
-  await ctx.answerCbQuery();
-
-  if (!isAdmin(ctx)) return;
-
-  const { data: orders } =
-    await supabase
-      .from("orders")
-      .select("total")
-      .eq("status", "confirmed");
-
-  const totalSales =
-    (orders || []).reduce(
-      (sum, order) =>
-        sum + Number(order.total || 0),
-      0
+  if (!data || data.length === 0) {
+    await bot.sendMessage(
+      chatId,
+      "👥 No customers found."
     );
 
-  const totalOrders =
-    orders?.length || 0;
+    return;
+  }
 
-  const { count: customers } =
-    await supabase
-      .from("users")
-      .select("*", {
-        count: "exact",
-        head: true
-      })
-      .eq("role", "customer");
+  let text = "👥 CUSTOMERS\n\n";
 
-  await ctx.reply(
-`📊 SALES DASHBOARD
+  data.forEach((user, index) => {
+    text +=
+      `${index + 1}. ` +
+      `${user.first_name || "User"}\n` +
+      `📧 ${user.email || "-"}\n` +
+      `👤 @${user.username || "-"}\n\n`;
+  });
 
-💰 Total Sales:
-${money(totalSales)}
-
-📦 Confirmed Orders:
-${totalOrders}
-
-👥 Customers:
-${customers || 0}`,
-    Markup.inlineKeyboard([
-      [
-        Markup.button.callback(
-          "⚙️ Admin Panel",
-          "admin"
-        )
-      ]
-    ])
+  await bot.sendMessage(
+    chatId,
+    text
   );
-});
+}
 
-/* =========================
-   CUSTOMERS
-========================= */
 
-bot.action("admin:customers", async (ctx) => {
+/*
+========================================
+ADD PRODUCT
+========================================
+*/
 
-  await ctx.answerCbQuery();
+async function startAddProduct(chatId, userId) {
+  sessions.set(userId, {
+    mode: "add_name",
+    product: {}
+  });
 
-  if (!isAdmin(ctx)) return;
-
-  const { count } =
-    await supabase
-      .from("users")
-      .select("*", {
-        count: "exact",
-        head: true
-      })
-      .eq("role", "customer");
-
-  await ctx.reply(
-`👥 CUSTOMERS
-
-Total customers:
-${count || 0}`,
-    Markup.inlineKeyboard([
-      [
-        Markup.button.callback(
-          "⚙️ Admin Panel",
-          "admin"
-        )
-      ]
-    ])
+  await bot.sendMessage(
+    chatId,
+    "➕ ADD PRODUCT\n\n" +
+    "Product name भेजो:"
   );
-});
+}
 
-/* =========================
-   TEXT INPUT HANDLER
-========================= */
 
-bot.on("text", async (ctx) => {
+/*
+========================================
+TEXT HANDLER
+========================================
+*/
 
-  const userId = ctx.from.id;
+bot.on("message", async (msg) => {
+  if (!msg.text) {
+    return;
+  }
 
-  const s = sessions.get(userId);
+  if (msg.text.startsWith("/")) {
+    return;
+  }
 
-  if (!s?.mode) return;
+  const userId = String(msg.from.id);
+  const chatId = msg.chat.id;
 
-  const text = ctx.message.text.trim();
+  const session = sessions.get(userId);
 
-  /* EMAIL */
+  if (!session || !session.mode) {
+    return;
+  }
 
-  if (s.mode === "email") {
 
-    if (
-      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text)
-    ) {
-      return ctx.reply(
-        "❌ सही email डालो।\n\nExample:\naditya@gmail.com"
+  /*
+  ================================
+  EMAIL
+  ================================
+  */
+
+  if (session.mode === "email") {
+    const email = msg.text
+      .trim()
+      .toLowerCase();
+
+    const emailRegex =
+      /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+    if (!emailRegex.test(email)) {
+      await bot.sendMessage(
+        chatId,
+        "❌ सही email डालो.\n\n" +
+        "Example:\n" +
+        "example@gmail.com"
       );
+
+      return;
     }
 
-    const { error } =
-      await supabase
-        .from("users")
-        .update({
-          email: text
-        })
-        .eq("telegram_id", userId);
+    const user = await saveUser(
+      {
+        from: msg.from
+      },
+      email
+    );
+
+    if (!user) {
+      await bot.sendMessage(
+        chatId,
+        "❌ Account save नहीं हुआ.\n" +
+        "Supabase settings check करो."
+      );
+
+      return;
+    }
 
     clearSession(userId);
 
-    if (error) {
-      console.error(error);
-      return ctx.reply(
-        "❌ Email save नहीं हुआ।"
+    const admin =
+      email === ADMIN_EMAIL;
+
+    await bot.sendMessage(
+      chatId,
+      admin
+        ? "✅ Admin account connected!\n\nWelcome Admin."
+        : "✅ Account created successfully!",
+      mainMenu(admin)
+    );
+
+    return;
+  }
+
+
+  /*
+  ================================
+  ADD PRODUCT NAME
+  ================================
+  */
+
+  if (session.mode === "add_name") {
+    session.product.name =
+      msg.text.trim();
+
+    if (!session.product.name) {
+      await bot.sendMessage(
+        chatId,
+        "❌ Product name खाली नहीं हो सकता."
       );
+
+      return;
     }
 
-    return ctx.reply(
-      "✅ Email successfully saved.",
-      mainMenu(ctx)
-    );
-  }
+    session.mode =
+      "add_description";
 
-  /* ADD PRODUCT - NAME */
-
-  if (s.mode === "add_name") {
-
-    s.product.name = text;
-    s.mode = "add_description";
-
-    return ctx.reply(
+    await bot.sendMessage(
+      chatId,
       "📝 Product description भेजो:"
     );
+
+    return;
   }
 
-  /* ADD PRODUCT - DESCRIPTION */
 
-  if (s.mode === "add_description") {
+  /*
+  ================================
+  ADD PRODUCT DESCRIPTION
+  ================================
+  */
 
-    s.product.description = text;
-    s.mode = "add_price";
+  if (
+    session.mode ===
+    "add_description"
+  ) {
+    session.product.description =
+      msg.text.trim();
 
-    return ctx.reply(
-      "💰 Product price भेजो:\n\nExample: 499"
+    session.mode =
+      "add_price";
+
+    await bot.sendMessage(
+      chatId,
+      "💰 Product price भेजो:\n\n" +
+      "Example: 499"
     );
+
+    return;
   }
 
-  /* ADD PRODUCT - PRICE */
 
-  if (s.mode === "add_price") {
+  /*
+  ================================
+  ADD PRODUCT PRICE
+  ================================
+  */
 
-    const price = Number(text);
+  if (session.mode === "add_price") {
+    const price =
+      Number(msg.text.trim());
 
     if (
       !Number.isFinite(price) ||
       price < 0
     ) {
-      return ctx.reply(
-        "❌ सही price डालो।"
+      await bot.sendMessage(
+        chatId,
+        "❌ सही price डालो.\n\n" +
+        "Example: 499"
       );
+
+      return;
     }
 
-    s.product.price = price;
-    s.mode = "add_stock";
+    session.product.price =
+      price;
 
-    return ctx.reply(
-      "📦 Product stock भेजो:\n\nExample: 10"
+    session.mode =
+      "add_stock";
+
+    await bot.sendMessage(
+      chatId,
+      "📦 Product stock भेजो:\n\n" +
+      "Example: 10"
     );
+
+    return;
   }
 
-  /* ADD PRODUCT - STOCK */
 
-  if (s.mode === "add_stock") {
+  /*
+  ================================
+  ADD PRODUCT STOCK
+  ================================
+  */
 
-    const stock = Number(text);
+  if (session.mode === "add_stock") {
+    const stock =
+      Number(msg.text.trim());
 
     if (
       !Number.isInteger(stock) ||
       stock < 0
     ) {
-      return ctx.rep
+      await bot.sendMessage(
+        chatId,
+        "❌ सही stock डालो.\n\n" +
+        "Example: 10"
+      );
+
+      return;
+    }
+
+    session.product.stock =
+      stock;
+
+    const { data, error } =
+      await supabase
+        .from("products")
+        .insert({
+          name:
+            session.product.name,
+          description:
+            session.product.description,
+          price:
+            session.product.price,
+          stock:
+            session.product.stock
+        })
+        .select()
+        .single();
+
+    if (error) {
+      console.error(
+        "Product insert:",
+        error
+      );
+
+      await bot.sendMessage(
+        chatId,
+        "❌ Product save नहीं हुआ.\n\n" +
+        error.message
+      );
+
+      return;
+    }
+
+    const productName =
+      data.name;
+
+    const productPrice =
+      data.price;
+
+    const productStock =
+      data.stock;
+
+    clearSession(userId);
+
+    await bot.sendMessage(
+      chatId,
+      "✅ PRODUCT ADDED!\n\n" +
+      `📦 Name: ${productName}\n` +
+      `💰 Price: ${money(productPrice)}\n` +
+      `📊 Stock: ${productStock}`,
+      mainMenu(true)
+    );
+
+    return;
+  }
+});
+
+
+/*
+========================================
+CALLBACK BUTTONS
+========================================
+*/
+
+bot.on(
+  "callback_query",
+  async (query) => {
+    const chatId =
+      query.message.chat.id;
+
+    const userId =
+      String(query.from.id);
+
+    const action =
+      query.data;
+
+    try {
+      await bot.answerCallbackQuery(
+        query.id
+      );
+    } catch (_) {}
+
+
+    /*
+    ================================
+    HOME
+    ================================
+    */
+
+    if (action === "home") {
+      const admin =
+        await isAdmin({
+          from: query.from
+        });
+
+      await bot.sendMessage(
+        chatId,
+        "🏠 MAIN MENU",
+        mainMenu(admin)
+      );
+
+      return;
+    }
+
+
+    /*
+    ================================
+    PRODUCTS
+    ================================
+    */
+
+    if (action === "products") {
+      await showProducts(chatId);
+      return;
+    }
+
+
+    /*
+    ================================
+    ACCOUNT
+    ================================
+    */
+
+    if (action === "account") {
+      const user =
+        await getUser(userId);
+
+      if (!user) {
+        await bot.sendMessage(
+          chatId,
+          "❌ Account नहीं मिला.\n" +
+          "पहले /start करो."
+        );
+
+        return;
+      }
+
+      await bot.sendMessage(
+        chatId,
+        "👤 MY ACCOUNT\n\n" +
+        `📧 Email: ${user.email || "-"}\n` +
+        `👤 Username: @${user.username || "-"}\n` +
+        `🔐 Role: ${user.role || "customer"}`,
+        mainMenu(
+          String(user.email || "")
+            .toLowerCase() ===
+            ADMIN_EMAIL
+        )
+      );
+
+      return;
+    }
+
+
+    /*
+    ================================
+    ADMIN
+    ================================
+    */
+
+    if (action === "admin") {
+      const admin =
+        await isAdmin({
+          from: query.from
+        });
+
+      if (!admin) {
+        await bot.sendMessage(
+          chatId,
+          "❌ Admin access denied."
+        );
+
+        return;
+      }
+
+      await showAdminMenu(chatId);
+      return;
+    }
+
+
+    /*
+    ================================
+    ADD PRODUCT
+    ================================
+    */
+
+    if (action === "add_product") {
+      const admin =
+        await isAdmin({
+          from: query.from
+        });
+
+      if (!admin) {
+        await bot.sendMessage(
+          chatId,
+          "❌ Admin access denied."
+        );
+
+        return;
+      }
+
+      await startAddProduct(
+        chatId,
+        userId
+      );
+
+      return;
+    }
+
+
+    /*
+    ================================
+    DASHBOARD
+    ================================
+    */
+
+    if (action === "dashboard") {
+      const admin =
+        await isAdmin({
+          from: query.from
+        });
+
+      if (!admin) {
+        await bot.sendMessage(
+          chatId,
+          "❌ Admin access denied."
+        );
+
+        return;
+      }
+
+      await showDashboard(chatId);
+      return;
+    }
+
+
+    /*
+    ================================
+    CUSTOMERS
+    ================================
+    */
+
+    if (action === "customers") {
+      const admin =
+        await isAdmin({
+          from: query.from
+        });
+
+      if (!admin) {
+        await bot.sendMessage(
+          chatId,
+          "❌ Admin access denied."
+        );
+
+        return;
+      }
+
+      await showCustomers(chatId);
+      return;
+    }
+
+
+    /*
+    ================================
+    BUY PRODUCT
+    ================================
+    */
+
+    if (action.startsWith("buy_")) {
+      const productId =
+        action.replace(
+          "buy_",
+          ""
+        );
+
+      const { data: product, error } =
+        await supabase
+          .from("products")
+          .select("*")
+          .eq("id", productId)
+          .maybeSingle();
+
+      if (error || !product) {
+        await bot.sendMessage(
+          chatId,
+          "❌ Product नहीं मिला."
+        );
+
+        return;
+      }
+
+      if (
+        Number(product.stock || 0) <=
+        0
+      ) {
+        await bot.sendMessage(
+          chatId,
+          "❌ यह product out of stock है."
+        );
+
+        return;
+      }
+
+      await bot.sendMessage(
+        chatId,
+        "🛒 PRODUCT\n\n" +
+        `📦 ${product.name}\n\n` +
+        `${product.description || ""}\n\n` +
+        `💰 Price: ${money(product.price)}\n` +
+        `📊 Stock: ${product.stock}\n\n` +
+        "💳 Purchase करने के लिए Admin से contact करें."
+      );
+
+      return;
+    }
+  }
+);
+
+
+/*
+========================================
+ERROR HANDLING
+========================================
+*/
+
+bot.on("polling_error", (error) => {
+  console.error(
+    "Telegram polling error:",
+    error.message
+  );
+});
+
+
+process.on(
+  "unhandledRejection",
+  (error) => {
+    console.error(
+      "Unhandled rejection:",
+      error
+    );
+  }
+);
+
+
+process.on(
+  "uncaughtException",
+  (error) => {
+    console.error(
+      "Uncaught exception:",
+      error
+    );
+  }
+);
+
+
+/*
+========================================
+START BOT
+========================================
+*/
+
+console.log(
+  "🤖 Telegram Shop Bot is starting..."
+);
+
+console.log(
+  "✅ Bot is running."
+);

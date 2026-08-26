@@ -768,7 +768,7 @@ async function sendOrders(chatId, user) {
 `🧾 <b>#${escapeHtml(
         String(order.id).slice(-8)
       )}</b>
-🛍 ${      text +=
+🛍 ${text +=
         `\n📦 <b>${escapeHtml(
           String(
             order.product_name ??
